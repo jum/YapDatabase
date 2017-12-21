@@ -100,7 +100,7 @@ NSString *YDBExtractFileNameWithoutExtension(const char *filePath);
 // There is a TON of documentation available from the project page:
 // https://github.com/robbiehanson/CocoaLumberjack
 
-#import <CocoaLumberjack/CocoaLumberjack.h>
+#import "CocoaLumberjack.h"
 
 #define YDBLogAsync   NO
 #define YDBLogContext 27017
