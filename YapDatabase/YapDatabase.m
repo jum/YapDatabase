@@ -820,16 +820,27 @@ static int connectionBusyHandler(void *ptr, int count) {
 **/
 - (BOOL)configureEncryptionForDatabase:(sqlite3 *)sqlite
 {
-    if (options.cipherKeyBlock)
+    if (options.cipherKeyBlock ||
+        options.cipherKeySpecBlock)
 	{
-		NSData *keyData = options.cipherKeyBlock();
-		
-		if (keyData == nil)
-		{
-			NSAssert(NO, @"YapDatabaseOptions.cipherKeyBlock cannot return nil!");
-			return NO;
-		}
-		
+        NSData *_Nullable keyData = nil;
+        if (options.cipherKeySpecBlock)
+        {
+            keyData = options.cipherKeySpecBlock();
+            if (!keyData)
+            {
+                NSAssert(NO, @"YapDatabaseOptions.cipherKeySpecBlock cannot return nil!");
+                return NO;
+            }
+        } else {
+            keyData = options.cipherKeyBlock();
+            if (!keyData)
+            {
+                NSAssert(NO, @"YapDatabaseOptions.cipherKeyBlock cannot return nil!");
+                return NO;
+            }
+        }
+        
         //Setting the PBKDF2 default iteration number (this will have effect next time database is opened)
         if (options.cipherDefaultkdfIterNumber > 0) {
             char *errorMsg;
@@ -863,16 +874,107 @@ static int connectionBusyHandler(void *ptr, int count) {
             }
         }
         
-		int status = sqlite3_key(sqlite, [keyData bytes], (int)[keyData length]);
-		if (status != SQLITE_OK)
-		{
-			YDBLogError(@"Error setting SQLCipher key: %d %s", status, sqlite3_errmsg(sqlite));
-			return NO;
-		}
+        if (options.cipherKeySpecBlock) {
+            // Use a raw key spec, where the 96 hexadecimal digits are provided
+            // (i.e. 64 hex for the 256 bit key, followed by 32 hex for the 128 bit salt)
+            // using explicit BLOB syntax, e.g.:
+            //
+            // x'98483C6EB40B6C31A448C22A66DED3B5E5E8D5119CAC8327B655C8B5C483648101010101010101010101010101010101'
+            NSString *keySpecString = [NSString stringWithFormat:@"x'%@'", [self hexadecimalStringForData:keyData]];
+            NSData *keySpecStringData = [keySpecString dataUsingEncoding:NSUTF8StringEncoding];
+            int status = sqlite3_key(sqlite, [keySpecStringData bytes], (int)[keySpecStringData length]);
+            if (status != SQLITE_OK)
+            {
+                YDBLogError(@"Error setting SQLCipher key: %d %s", status, sqlite3_errmsg(sqlite));
+                return NO;
+            }
+        } else {
+            int status = sqlite3_key(sqlite, [keyData bytes], (int)[keyData length]);
+            if (status != SQLITE_OK)
+            {
+                YDBLogError(@"Error setting SQLCipher key: %d %s", status, sqlite3_errmsg(sqlite));
+                return NO;
+            }
+        }
+        
+        if (options.cipherUnencryptedHeaderLength > 0 &&
+            (options.cipherKeySpecBlock ||
+             options.cipherSaltBlock)) {
+             
+            if (options.cipherKeySpecBlock) {
+                // YapDatabase using cipher key spec and unencrypted header.
+            } else {
+                // YapDatabase using cipher salt and unencrypted header.
+                
+                NSData *_Nullable saltData = options.cipherSaltBlock();
+                
+                if (saltData == nil)
+                {
+                    NSAssert(NO, @"YapDatabaseOptions.cipherSaltBlock cannot return nil!");
+                    return NO;
+                }
+
+                {
+                    char *errorMsg;
+                    // Example: PRAGMA cipher_salt = "x'01010101010101010101010101010101';";
+                    NSString *pragmaSql = [NSString stringWithFormat:@"PRAGMA cipher_salt = \"x'%@'\";", [self hexadecimalStringForData:saltData]];
+                    if (sqlite3_exec(sqlite, [pragmaSql UTF8String], NULL, NULL, &errorMsg) != SQLITE_OK)
+                    {
+                        YDBLogError(@"failed to set database cipher_default_kdf_iter: %s", errorMsg);
+                        return NO;
+                    }
+                }
+            }
+            
+            {
+                // We use cipher_plaintext_header_size NOT cipher_default_plaintext_header_size,
+                // since the _default_ pragma affects a static variable.
+                NSString *pragmaSql =
+                [NSString stringWithFormat:@"PRAGMA cipher_plaintext_header_size = %zd;", options.cipherUnencryptedHeaderLength];
+                int status = sqlite3_exec(sqlite, [pragmaSql UTF8String], NULL, NULL, NULL);
+                if (status != SQLITE_OK) {
+                    YDBLogError(@"Error setting PRAGMA cipher_plaintext_header_size = %zd: status: %d, error: %s",
+                                options.cipherUnencryptedHeaderLength,
+                                status,
+                                sqlite3_errmsg(sqlite));
+                    return NO;
+                }
+            }
+        } else {
+            if (options.cipherUnencryptedHeaderLength > 0) {
+                NSAssert(NO, @"YapDatabaseOptions.cipherUnencryptedHeaderLength should not be used without cipherKeySpecBlock or cipherSaltBlock!");
+                return NO;
+            }
+            if (options.cipherKeySpecBlock) {
+                NSAssert(NO, @"YapDatabaseOptions.cipherKeySpecBlock should not be used without setting cipherUnencryptedHeaderLength!");
+                return NO;
+            }
+            if (options.cipherSaltBlock) {
+                NSAssert(NO, @"YapDatabaseOptions.cipherSaltBlock should not be used without setting cipherUnencryptedHeaderLength!");
+                return NO;
+            }
+        }
 	}
 	
 	return YES;
 }
+
+- (NSString *)hexadecimalStringForData:(NSData *)data {
+    /* Returns hexadecimal string of NSData. Empty string if data is empty. */
+    const unsigned char *dataBuffer = (const unsigned char *)[data bytes];
+    if (!dataBuffer) {
+        return @"";
+    }
+        
+    NSUInteger dataLength = [data length];
+    NSMutableString *hexString = [NSMutableString stringWithCapacity:(dataLength * 2)];
+    
+    for (NSUInteger i = 0; i < dataLength; ++i) {
+        [hexString appendFormat:@"%02x", dataBuffer[i]];
+    }
+    return [hexString copy];
+}
+
 #endif
 
 /**
@@ -1503,156 +1605,79 @@ static int connectionBusyHandler(void *ptr, int count) {
 
 - (YapDatabaseConnectionConfig *)connectionDefaults
 {
-	__block YapDatabaseConnectionConfig *result = nil;
-	
-	dispatch_sync(internalQueue, ^{
-		
-		result = [connectionDefaults copy];
-	});
-	
-	return result;
+	return connectionDefaults;
 }
 
 - (BOOL)defaultObjectCacheEnabled
 {
-	__block BOOL result = NO;
-	
-	dispatch_sync(internalQueue, ^{
-		
-		result = connectionDefaults.objectCacheEnabled;
-	});
-	
-	return result;
+	return connectionDefaults.objectCacheEnabled;
 }
 
 - (void)setDefaultObjectCacheEnabled:(BOOL)defaultObjectCacheEnabled
 {
-	dispatch_sync(internalQueue, ^{
-		
-		connectionDefaults.objectCacheEnabled = defaultObjectCacheEnabled;
-	});
+	connectionDefaults.objectCacheEnabled = defaultObjectCacheEnabled;
 }
 
 - (NSUInteger)defaultObjectCacheLimit
 {
-	__block NSUInteger result = NO;
-	
-	dispatch_sync(internalQueue, ^{
-		
-		result = connectionDefaults.objectCacheLimit;
-	});
-	
-	return result;
+	return connectionDefaults.objectCacheLimit;
 }
 
 - (void)setDefaultObjectCacheLimit:(NSUInteger)defaultObjectCacheLimit
 {
-	dispatch_sync(internalQueue, ^{
-		
-		connectionDefaults.objectCacheLimit = defaultObjectCacheLimit;
-	});
+	connectionDefaults.objectCacheLimit = defaultObjectCacheLimit;
 }
 
 - (BOOL)defaultMetadataCacheEnabled
 {
-	__block BOOL result = NO;
-	
-	dispatch_sync(internalQueue, ^{
-		
-		result = connectionDefaults.metadataCacheEnabled;
-	});
-	
-	return result;
+	return connectionDefaults.metadataCacheEnabled;
 }
 
 - (void)setDefaultMetadataCacheEnabled:(BOOL)defaultMetadataCacheEnabled
 {
-	dispatch_sync(internalQueue, ^{
-		
-		connectionDefaults.metadataCacheEnabled = defaultMetadataCacheEnabled;
-	});
+	connectionDefaults.metadataCacheEnabled = defaultMetadataCacheEnabled;
 }
 
 - (NSUInteger)defaultMetadataCacheLimit
 {
-	__block NSUInteger result = 0;
-	
-	dispatch_sync(internalQueue, ^{
-		
-		result = connectionDefaults.metadataCacheLimit;
-	});
-	
-	return result;
+	return connectionDefaults.metadataCacheLimit;
 }
 
 - (void)setDefaultMetadataCacheLimit:(NSUInteger)defaultMetadataCacheLimit
 {
-	dispatch_sync(internalQueue, ^{
-		
-		connectionDefaults.metadataCacheLimit = defaultMetadataCacheLimit;
-	});
+	connectionDefaults.metadataCacheLimit = defaultMetadataCacheLimit;
 }
 
 - (YapDatabasePolicy)defaultObjectPolicy
 {
-	__block YapDatabasePolicy result = YapDatabasePolicyShare;
-	
-	dispatch_sync(internalQueue, ^{
-		
-		result = connectionDefaults.objectPolicy;
-	});
-	
-	return result;
+	return connectionDefaults.objectPolicy;
 }
 
 - (void)setDefaultObjectPolicy:(YapDatabasePolicy)defaultObjectPolicy
 {
-	dispatch_sync(internalQueue, ^{
-		
-		connectionDefaults.objectPolicy = defaultObjectPolicy;
-	});
+	connectionDefaults.objectPolicy = defaultObjectPolicy;
 }
 
 - (YapDatabasePolicy)defaultMetadataPolicy
 {
-	__block YapDatabasePolicy result = YapDatabasePolicyShare;
-	
-	dispatch_sync(internalQueue, ^{
-		
-		result = connectionDefaults.metadataPolicy;
-	});
-	
-	return result;
+	return connectionDefaults.metadataPolicy;
 }
 
 - (void)setDefaultMetadataPolicy:(YapDatabasePolicy)defaultMetadataPolicy
 {
-	dispatch_sync(internalQueue, ^{
-		
-		connectionDefaults.metadataPolicy = defaultMetadataPolicy;
-	});
+	connectionDefaults.metadataPolicy = defaultMetadataPolicy;
 }
 
 #if TARGET_OS_IOS || TARGET_OS_TV
 
 - (YapDatabaseConnectionFlushMemoryFlags)defaultAutoFlushMemoryFlags
 {
-	__block YapDatabaseConnectionFlushMemoryFlags result = YapDatabaseConnectionFlushMemoryFlags_None;
-	
-	dispatch_sync(internalQueue, ^{
-		
-		result = connectionDefaults.autoFlushMemoryFlags;
-	});
-	
-	return result;
+	return connectionDefaults.autoFlushMemoryFlags;
 }
 
 - (void)setDefaultAutoFlushMemoryFlags:(YapDatabaseConnectionFlushMemoryFlags)defaultAutoFlushMemoryFlags
 {
-	dispatch_sync(internalQueue, ^{
-		
-		connectionDefaults.autoFlushMemoryFlags = defaultAutoFlushMemoryFlags;
-	});
+	connectionDefaults.autoFlushMemoryFlags = defaultAutoFlushMemoryFlags;
 }
 
 #endif
@@ -1739,6 +1764,17 @@ static int connectionBusyHandler(void *ptr, int count) {
 - (YapDatabaseConnection *)newConnection
 {
 	YapDatabaseConnection *connection = [[YapDatabaseConnection alloc] initWithDatabase:self];
+	
+	[self addConnection:connection];
+	return connection;
+}
+
+/**
+ * This is a public method called to create a new connection.
+**/
+- (YapDatabaseConnection *)newConnection:(YapDatabaseConnectionConfig *)config
+{
+	YapDatabaseConnection *connection = [[YapDatabaseConnection alloc] initWithDatabase:self config:config];
 	
 	[self addConnection:connection];
 	return connection;
@@ -2740,6 +2776,7 @@ static int connectionBusyHandler(void *ptr, int count) {
 	// Forward the changeset to all other connections so they can perform any needed updates.
 	// Generally this means updating the in-memory components such as the cache.
 	
+	NSMutableArray<YapDatabaseConnection *> *strongConnections = nil;
 	dispatch_group_t group = NULL;
 	
 	for (YapDatabaseConnectionState *state in connectionStates)
@@ -2751,6 +2788,11 @@ static int connectionBusyHandler(void *ptr, int count) {
 			
 			if (connection)
 			{
+				if (strongConnections == nil)
+					strongConnections = [NSMutableArray array];
+				
+				[strongConnections addObject:connection];
+				
 				if (group == NULL)
 					group = dispatch_group_create();
 				
@@ -2794,6 +2836,22 @@ static int connectionBusyHandler(void *ptr, int count) {
 		dispatch_group_notify(group, snapshotQueue, block);
 	else
 		block();
+	
+	if (strongConnections)
+	{
+		// Edge case protection:
+		// Bug fix for issues: #437, #441
+		//
+		// Deadlock crash if:
+		// - YapDatabase is the last one holding a strong reference to a YapDatabaseConnection instance
+		// - The [connection dealloc] call occurs within the snapshotQueue
+		//
+		// This is a workaround to ensure that the dealloc occurs outside the snapshotQueue.
+		//
+		dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ @autoreleasepool {
+			[strongConnections removeAllObjects];
+		}});
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -3111,7 +3169,8 @@ static int connectionBusyHandler(void *ptr, int count) {
 {
 	NSAssert(dispatch_get_specific(IsOnWriteQueueKey), @"Must go through writeQueue.");
 	
-	dispatch_group_t group = dispatch_group_create();
+	__block NSMutableArray<YapDatabaseConnection *> *strongConnections = nil;
+	__block dispatch_group_t group = NULL;
 	
 	__block YAPUnfairLock spinLock = YAP_UNFAIR_LOCK_INIT;
 	__block atomic_bool hasWriteQueue = true;
@@ -3122,9 +3181,19 @@ static int connectionBusyHandler(void *ptr, int count) {
 		{
 			if (state->activeReadTransaction && state->longLivedReadTransaction)
 			{
+				// Create strong reference (state->connection is weak)
 				__strong YapDatabaseConnection *connection = state->connection;
+				
 				if (connection)
 				{
+					if (strongConnections == nil)
+						strongConnections = [NSMutableArray array];
+					
+					[strongConnections addObject:connection];
+					
+					if (group == NULL)
+						group = dispatch_group_create();
+					
 					dispatch_group_async(group, connection->connectionQueue, ^{
 						
 						YAPUnfairLockLock(&spinLock);
@@ -3141,7 +3210,28 @@ static int connectionBusyHandler(void *ptr, int count) {
 		}
 	}});
 	
-	long ready = dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(50 * NSEC_PER_MSEC)));
+	if (strongConnections)
+	{
+		// Edge case protection:
+		// Bug fix for issues: #437, #441
+		//
+		// Deadlock crash if:
+		// - YapDatabase is the last one holding a strong reference to a YapDatabaseConnection instance
+		// - The [connection dealloc] call occurs within the snapshotQueue
+		//
+		// This is a workaround to ensure that the dealloc occurs outside the snapshotQueue.
+		//
+		[strongConnections removeAllObjects];
+	}
+	
+	// dispatch_group_wait():
+	// Returns zero on success (all blocks associated with the group completed before the specified timeout)
+	// or non-zero on error (timeout occurred).
+	//
+	long ready = 0;
+	if (group) {
+		ready = dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(50 * NSEC_PER_MSEC)));
+	}
 	
 	if (ready != 0)
 	{
@@ -3179,5 +3269,25 @@ static int connectionBusyHandler(void *ptr, int count) {
 		atomic_store(&aggressiveCheckpointEnabled, false);
 	}
 }
+
+#ifdef DEBUG
+
+// This method is only used by tests.
+- (void)flushInternalQueue
+{
+    dispatch_sync(internalQueue,
+                  ^{
+                  });
+}
+
+// This method is only used by tests.
+- (void)flushCheckpointQueue
+{
+    dispatch_sync(checkpointQueue,
+                  ^{
+                  });
+}
+
+#endif
 
 @end

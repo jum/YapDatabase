@@ -13,7 +13,7 @@ Pod::Spec.new do |s|
     :tag => s.version.to_s
   }
 
-  s.osx.deployment_target = '10.9'
+  s.osx.deployment_target = '10.10'
   s.ios.deployment_target = '8.0'
   s.tvos.deployment_target = '9.0'
   s.watchos.deployment_target = '2.0'
@@ -108,6 +108,10 @@ Pod::Spec.new do |s|
 
       sse.subspec 'ConnectionProxy' do |ssee|
         ssee.source_files = 'YapDatabase/Extensions/ConnectionProxy/**/*.{h,m,mm,c}'
+      end
+		
+      sse.subspec 'ConnectionPool' do |ssee|
+        ssee.source_files = 'YapDatabase/Extensions/ConnectionPool/**/*.{h,m,mm,c}'
       end
 
       sse.subspec 'ActionManager' do |ssee|
@@ -209,6 +213,10 @@ Pod::Spec.new do |s|
 
       sse.subspec 'ConnectionProxy' do |ssee|
         ssee.source_files = 'YapDatabase/Extensions/ConnectionProxy/**/*.{h,m,mm,c}'
+      end
+		
+      sse.subspec 'ConnectionPool' do |ssee|
+        ssee.source_files = 'YapDatabase/Extensions/ConnectionPool/**/*.{h,m,mm,c}'
       end
 
       sse.subspec 'ActionManager' do |ssee|
