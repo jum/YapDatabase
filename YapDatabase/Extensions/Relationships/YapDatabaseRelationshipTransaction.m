@@ -1983,28 +1983,25 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 }
 
 /**
- * Queries the database for the number of edges matching the given source and name.
+ * Queries the database for the number of edges matching the given source.
  * This method only queries the database, and doesn't inspect anything in memory.
 **/
-- (int64_t)edgeCountWithSource:(int64_t)srcRowid name:(NSString *)name excludingDestination:(int64_t)dstRowid
+- (int64_t)edgeCountWithSource:(int64_t)srcRowid
+          excludingDestination:(int64_t)dstRowid
 {
-	sqlite3_stmt *statement = [parentConnection countForSrcNameExcludingDstStatement];
+	sqlite3_stmt *statement = [parentConnection countForSrcExcludingDstStatement];
 	if (statement == NULL) return 0;
 	
 	int64_t count = 0;
 	
-	// SELECT COUNT(*) AS NumberOfRows FROM "tableName" WHERE "src" = ? AND "dst" != ? AND "name" = ?;
+	// SELECT COUNT(*) AS NumberOfRows FROM "tableName" WHERE "src" = ? AND "dst" != ?;
 	
 	int const column_idx_count = SQLITE_COLUMN_START;
 	int const bind_idx_src     = SQLITE_BIND_START + 0;
 	int const bind_idx_dst     = SQLITE_BIND_START + 1;
-	int const bind_idx_name    = SQLITE_BIND_START + 2;
 	
 	sqlite3_bind_int64(statement, bind_idx_src, srcRowid);
 	sqlite3_bind_int64(statement, bind_idx_dst, dstRowid);
-	
-	YapDatabaseString _name; MakeYapDatabaseString(&_name, name);
-	sqlite3_bind_text(statement, bind_idx_name, _name.str, _name.length, SQLITE_STATIC);
 	
 	int status = sqlite3_step(statement);
 	if (status == SQLITE_ROW)
@@ -2019,36 +2016,30 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 	
 	sqlite3_clear_bindings(statement);
 	sqlite3_reset(statement);
-	FreeYapDatabaseString(&_name);
 	
 	return count;
 }
 
 /**
- * Queries the database for the number of edges matching the given destination and name.
+ * Queries the database for the number of edges matching the given destination.
  * This method only queries the database, and doesn't inspect anything in memory.
 **/
-- (int64_t)edgeCountWithDestination:(int64_t)dstRowid name:(NSString *)name excludingSource:(int64_t)srcRowid
+- (int64_t)edgeCountWithDestination:(int64_t)dstRowid
+                    excludingSource:(int64_t)srcRowid
 {
-	NSAssert(name != nil, @"Internal logic error");
-	
-	sqlite3_stmt *statement = [parentConnection countForDstNameExcludingSrcStatement];
+	sqlite3_stmt *statement = [parentConnection countForDstExcludingSrcStatement];
 	if (statement == NULL) return 0;
 	
 	int64_t count = 0;
 	
-	// SELECT COUNT(*) AS NumberOfRows FROM "tableName" WHERE "dst" = ? AND "src" != ? AND "name" = ?;
+	// SELECT COUNT(*) AS NumberOfRows FROM "tableName" WHERE "dst" = ? AND "src" != ?;
 	
 	int const column_idx_count = SQLITE_COLUMN_START;
 	int const bind_idx_dst     = SQLITE_BIND_START + 0;
 	int const bind_idx_src     = SQLITE_BIND_START + 1;
-	int const bind_idx_name    = SQLITE_BIND_START + 2;
 	
 	sqlite3_bind_int64(statement, bind_idx_dst, dstRowid);
 	sqlite3_bind_int64(statement, bind_idx_src, srcRowid);
-	
-	YapDatabaseString _name; MakeYapDatabaseString(&_name, name);
-	sqlite3_bind_text(statement, bind_idx_name, _name.str, _name.length, SQLITE_STATIC);
 	
 	int status = sqlite3_step(statement);
 	if (status == SQLITE_ROW)
@@ -2063,7 +2054,6 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 	
 	sqlite3_clear_bindings(statement);
 	sqlite3_reset(statement);
-	FreeYapDatabaseString(&_name);
 	
 	return count;
 }
@@ -2073,36 +2063,31 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
  * This method only queries the database, and doesn't inspect anything in memory.
 **/
 - (int64_t)edgeCountWithDestinationFileURL:(NSURL *)dstFileURL
-                                      name:(NSString *)name
                            excludingSource:(int64_t)exclSrcRowid
 {
 	NSAssert(dstFileURL != nil, @"Internal logic error");
-	NSAssert(name != nil, @"Internal logic error");
 	
 	BOOL needsFinalize;
-	sqlite3_stmt *statement = [parentConnection enumerateDstFileURLWithNameExcludingSrcStatement:&needsFinalize];
+	sqlite3_stmt *statement = [parentConnection enumerateDstFileURLExcludingSrcStatement:&needsFinalize];
 	if (statement == NULL) return 0;
 	
 	int64_t count = 0;
 	
-	// SELECT "rowid", "src", "dst", "rules", "manual" FROM "tableName"
-	//  WHERE "dst" > INT64_MAX AND "src" != ? AND "name" = ?;
+	// SELECT "rowid", "name", "src", "dst", "rules", "manual" FROM "tableName"
+	//  WHERE "dst" > INT64_MAX AND "src" != ?;
 	//
 	// AKA: typeof(dst) IS BLOB
 	
 	int const column_idx_rowid  = SQLITE_COLUMN_START + 0;
-	int const column_idx_src    = SQLITE_COLUMN_START + 1;
-	int const column_idx_dst    = SQLITE_COLUMN_START + 2;
-	int const column_idx_rules  = SQLITE_COLUMN_START + 3;
-	int const column_idx_manual = SQLITE_COLUMN_START + 4;
+	int const column_idx_name   = SQLITE_COLUMN_START + 1;
+	int const column_idx_src    = SQLITE_COLUMN_START + 2;
+	int const column_idx_dst    = SQLITE_COLUMN_START + 3;
+	int const column_idx_rules  = SQLITE_COLUMN_START + 4;
+	int const column_idx_manual = SQLITE_COLUMN_START + 5;
 	
 	int const bind_idx_src = SQLITE_BIND_START + 0;
-	int const bind_idx_name = SQLITE_BIND_START + 1;
-	
+
 	sqlite3_bind_int64(statement, bind_idx_src, exclSrcRowid);
-	
-	YapDatabaseString _name; MakeYapDatabaseString(&_name, name);
-	sqlite3_bind_text(statement, bind_idx_name, _name.str, _name.length, SQLITE_STATIC);
 	
 	int status;
 	while ((status = sqlite3_step(statement)) == SQLITE_ROW)
@@ -2118,6 +2103,11 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 		else
 		{
 			int64_t srcRowid = sqlite3_column_int64(statement, column_idx_src);
+			
+			const unsigned char *text = sqlite3_column_text(statement, column_idx_name);
+			int textSize = sqlite3_column_bytes(statement, column_idx_name);
+			
+			NSString *name = [[NSString alloc] initWithBytes:text length:textSize encoding:NSUTF8StringEncoding];
 			
 			int64_t dstRowid = 0;
 			NSData *dstFileURLData = nil;
@@ -2164,7 +2154,6 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 	}
 	
 	sqlite3_reset(statement);
-	FreeYapDatabaseString(&_name);
 	
 	return count;
 }
@@ -3403,10 +3392,9 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 		{
 			if (edge->nodeDeleteRules & YDB_DeleteDestinationIfAllSourcesDeleted)
 			{
-				// Delete destination node IF there are no other edges pointing to it with the same name
+				// Delete destination file IF there are no other edges pointing to it
 				
 				int64_t count = [self edgeCountWithDestinationFileURL:edge->destinationFileURL
-				                                                 name:edge->name
 				                                      excludingSource:edge->sourceRowid];
 				if (count == 0)
 				{
@@ -3428,10 +3416,9 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 				}
 				else
 				{
-					// Delete destination node IF there are no other edges pointing to it with the same name
+					// Delete destination node IF there are no other edges pointing to it
 					
 					int64_t count = [self edgeCountWithDestination:edge->destinationRowid
-					                                          name:edge->name
 					                               excludingSource:edge->sourceRowid];
 					if (count == 0)
 					{
@@ -3477,10 +3464,9 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 				}
 				else
 				{
-					// Delete source node IF there are no other edges pointing from it with the same name
+					// Delete source node IF there are no other edges pointing from it
 					
 					int64_t count = [self edgeCountWithSource:edge->sourceRowid
-					                                     name:edge->name
 					                     excludingDestination:edge->destinationRowid];
 					if (count == 0)
 					{
@@ -3563,7 +3549,7 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 				{
 					if (edge->nodeDeleteRules & YDB_DeleteDestinationIfAllSourcesDeleted)
 					{
-						// Delete the destination node IF there are no other edges pointing to it with the same name
+						// Delete the destination file IF there are no other edges pointing to it
 						
 						if (!(edge->state & YDB_EdgeState_HasDestinationFileURL))
 						{
@@ -3573,7 +3559,6 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 						if (edge->destinationFileURL)
 						{
 							int64_t count = [self edgeCountWithDestinationFileURL:edge->destinationFileURL
-							                                                 name:edge->name
 							                                      excludingSource:srcRowid];
 							if (count == 0)
 							{
@@ -3609,11 +3594,10 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 						
 						if (edge->nodeDeleteRules & YDB_DeleteDestinationIfAllSourcesDeleted)
 						{
-							// Delete the destination node IF there are no other edges pointing to it with the same name
+							// Delete the destination node IF there are no other edges pointing to it
 							
 							int64_t count = [self edgeCountWithDestination:edge->destinationRowid
-							                                          name:edge->name
-							                               excludingSource:srcRowid];
+                                                           excludingSource:srcRowid];
 							if (count == 0)
 							{
 								shouldDeleteDestination = YES;
@@ -3743,11 +3727,10 @@ NS_INLINE BOOL URLMatchesURL(NSURL *url1, NSURL *url2)
 					
 					if (edge->nodeDeleteRules & YDB_DeleteSourceIfAllDestinationsDeleted)
 					{
-						// Delete the source node IF there are no other edges pointing from it with the same name
+						// Delete the source node IF there are no other edges pointing from it
 						
 						int64_t count = [self edgeCountWithSource:edge->sourceRowid
-						                                     name:edge->name
-						                     excludingDestination:dstRowid];
+                                             excludingDestination:dstRowid];
 						if (count == 0)
 						{
 							shouldDeleteSource = YES;
