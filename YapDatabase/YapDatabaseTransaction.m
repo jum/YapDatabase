@@ -296,13 +296,13 @@
 
 - (NSArray *)allCollections
 {
+	NSMutableArray *result = [NSMutableArray array];
+	
 	BOOL needsFinalize;
 	sqlite3_stmt *statement = [connection enumerateCollectionsStatement:&needsFinalize];
-	if (statement == NULL) return nil;
+	if (statement == NULL) return result;
 	
 	// SELECT DISTINCT "collection" FROM "database2";";
-	
-	NSMutableArray *result = [NSMutableArray array];
 	
 	int status;
 	while ((status = sqlite3_step(statement)) == SQLITE_ROW)
@@ -5606,15 +5606,17 @@
 			{
 				YDBLogError(@"Error creating 'removeKeys:inCollection:' statement (B): %d %s",
 							status, sqlite3_errmsg(connection->db));
+				
+				FreeYapDatabaseString(&_collection);
 				return;
 			}
 			
-            for (YapDatabaseExtensionTransaction *extTransaction in [self orderedExtensions])
-            {
-                [extTransaction willRemoveObjectsForKeys:foundKeys
-                                            inCollection:collection
-                                              withRowids:foundRowids];
-            }
+			for (YapDatabaseExtensionTransaction *extTransaction in [self orderedExtensions])
+			{
+				[extTransaction willRemoveObjectsForKeys:foundKeys
+				                            inCollection:collection
+				                              withRowids:foundRowids];
+			}
 			
 			for (i = 0; i < foundCount; i++)
 			{
