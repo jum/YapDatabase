@@ -11,8 +11,51 @@
 
 typedef NS_ENUM(NSInteger, YDBCloudCorePipelineAlgorithm) {
 	
+	/**
+	 * This is the default algorithm if you don't explicitly pick one.
+	 * It is HIGHLY recommended you start with this algorithm, until you become more advanced.
+	 *
+	 * The "Commit Graph" algorithm works as follows:
+	 *
+	 * - all operations added within a specific commit are added to their own "graph"
+	 * - the pipeline will execute each graph 1-at-a-time
+	 * - this ensures that graphs are completed in commit order
+	 *
+	 * That is, if a pipeline contains 2 graphs:
+	 * - graph "A" - representing operations from commit #32
+	 * - graph "B" - represending operations from commit #33
+	 *
+	 * Then the pipeline will ensure that ALL operations from graphA are either completed or skipped
+	 * before ANY operations from graphB start.
+	 *
+	 * This is the safest option because it means:
+	 * - you only have to think about operation dependencies within the context of a single commit
+	 * - the pipeline ensures the cloud moves from commit to commit (just as occurred locally)
+	**/
 	YDBCloudCorePipelineAlgorithm_CommitGraph = 0,
 	
+	/**
+	 * This is and ADVANCED algorithm that is only recommended after your cloud solution has matured.
+	 *
+	 * The "Flat Graph" algorithm works as follows:
+	 *
+	 * - all operations added within a specific commit are added to their own "graph"
+	 * - HOWEVER, the pipeline is free to start operations from ANY graph
+	 * - and it will do so, while respecting dependencies, priorities & maxConcurrentOperationCount
+	 *
+	 * In particular, what this means for you is:
+	 *
+	 * - you MUST create a FORMAL DEPENDENCY GRAPH (think: state diagram for dependencies)
+	 *
+	 * That is:
+	 * - given any possible operation (opA) in commitA
+	 * - and given any possible operation (opB) in commitB
+	 * - your formal dependency graph must determine if opB should depend on opA
+	 *
+	 * The recommended way of implementing your formal dependency graph is by
+	 * subclassing YapDatabaseCloudCoreTransaction & overriding the method
+	 * `processOperations:inPipeline:withGraphIdx:`.
+	**/
 	YDBCloudCorePipelineAlgorithm_FlatGraph = 1
 };
 
@@ -32,7 +75,7 @@ typedef NS_ENUM(NSInteger, YDBCloudCoreOperationStatus) {
 	 * The operation has been started.
 	 * I.e. has been handed to the PipelineDelegate via 'startOperation::'.
 	**/
-	YDBCloudOperationStatus_Started,
+	YDBCloudOperationStatus_Active,
 	
 	/**
 	 * Until an operation is marked as either completed or skipped,
@@ -79,14 +122,7 @@ extern NSString *const YDBCloudCorePipelineActiveStatusChangedNotification;
  * specific pipeline). Within the graph are the various operations with their different dependencies & priorities.
  * The operations within a graph will be executed in accordance with the set dependencies & priorities.
  * 
- * The pipeline manages executing the operations within a graph.
- * It also ensures that graphs are completed in commit order.
- * 
- * That is, if a pipeline contains 2 graphs:
- * - graph "A" - representing operations from commit #32
- * - graph "B" - represending operations from commit #33
- * 
- * Then the pipeline will ensure that all operations from graphA complete before any operations from graphB start.
+ * The pipeline manages executing the operations within each graph.
 **/
 @interface YapDatabaseCloudCorePipeline : NSObject
 
@@ -151,6 +187,11 @@ extern NSString *const YDBCloudCorePipelineActiveStatusChangedNotification;
 - (YapDatabaseCloudCoreOperation *)operationWithUUID:(NSUUID *)uuid;
 
 /**
+ * Returns a list of operations in state 'YDBCloudOperationStatus_Active'.
+**/
+- (NSArray<YapDatabaseCloudCoreOperation *> *)activeOperations;
+
+/**
  * Enumerates the queued operations.
  *
  * This is useful for finding operation.
@@ -209,11 +250,11 @@ extern NSString *const YDBCloudCorePipelineActiveStatusChangedNotification;
  * You should allow the pipeline to mange the queue, and only start operations when told to.
  *
  * However, there is one particular edge case in which is is unavoidable: background network tasks.
- * If the app is relaunched, and you discover there are network task from a previous app session,
+ * If the app is relaunched, and you discover there are network tasks from a previous app session,
  * you'll obviously want to avoid starting the corresponding operation again.
  * In this case, you should use this method to inform the pipeline that the operation is already started.
 **/
-- (void)setStatusAsStartedForOperationWithUUID:(NSUUID *)opUUID;
+- (void)setStatusAsActiveForOperationWithUUID:(NSUUID *)opUUID;
 
 /**
  * The PipelineDelegate may invoke this method to reset a failed operation.
@@ -317,11 +358,15 @@ extern NSString *const YDBCloudCorePipelineActiveStatusChangedNotification;
 
 /**
  * A pipeline transitions to the 'active' state when:
- * - There are 1 or more operations in 'YDBCloudOperationStatus_Started' mode.
+ * - There are 1 or more operations in 'YDBCloudOperationStatus_Active' mode.
  *
  * A pipeline transitions to the 'inactive' state when:
- * - There are 0 operations in 'YDBCloudOperationStatus_Started' mode
+ * - There are 0 operations in 'YDBCloudOperationStatus_Active' mode
  * - AND (the pipeline is suspended OR there are no more operations)
+ *
+ * ^In other words, there may be situations in which there are zero active operations,
+ *  due to something like a conflict resolution, however the pipeline is still considered
+ *  active because it still has pending operations, and it hasn't been suspended.
 **/
 @property (atomic, readonly) BOOL isActive;
 

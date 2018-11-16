@@ -238,6 +238,60 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 	return match;
 }
 
+/**
+ * Returns a list of operations in state 'YDBCloudOperationStatus_Active'.
+**/
+- (NSArray<YapDatabaseCloudCoreOperation *> *)activeOperations
+{
+	NSUInteger capacity = self.maxConcurrentOperationCount;
+	if (capacity == 0) {
+		capacity = 8;
+	}
+	
+	NSMutableArray<YapDatabaseCloudCoreOperation *> *results = [NSMutableArray arrayWithCapacity:capacity];
+	
+	dispatch_block_t block = ^{ @autoreleasepool {
+	#pragma clang diagnostic push
+	#pragma clang diagnostic ignored "-Wimplicit-retain-self"
+		
+		NSMutableSet<NSUUID *> *activeOpUUIDs = [NSMutableSet setWithCapacity:capacity];
+		
+		[ephemeralInfo enumerateKeysAndObjectsUsingBlock:
+			^(NSUUID *opUUID, NSMutableDictionary *opInfo, BOOL *stop)
+		{
+			NSNumber *statusNum = opInfo[YDBCloudCore_EphemeralKey_Status];
+			if (statusNum)
+			{
+				YDBCloudCoreOperationStatus status = (YDBCloudCoreOperationStatus)[statusNum integerValue];
+				if (status == YDBCloudOperationStatus_Active)
+				{
+					[activeOpUUIDs addObject:opUUID];
+				}
+			}
+		}];
+		
+		for (YapDatabaseCloudCoreGraph *graph in graphs)
+		{
+			for (YapDatabaseCloudCoreOperation *op in graph.operations)
+			{
+				if ([activeOpUUIDs containsObject:op.uuid])
+				{
+					[results addObject:[op copy]];
+				}
+			}
+		}
+		
+	#pragma clang diagnostic pop
+	}};
+	
+	if (dispatch_get_specific(IsOnQueueKey))
+		block();
+	else
+		dispatch_sync(queue, block);
+	
+	return results;
+}
+
 - (void)enumerateOperationsUsingBlock:(void (^)(YapDatabaseCloudCoreOperation *operation,
                                                 NSUInteger graphIdx, BOOL *stop))enumBlock
 {
@@ -471,6 +525,12 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		dispatch_sync(queue, block);
 }
 
+/**
+ * Returns whether or not the change was allowed (not necesarily whether it changed status).
+ *
+ * Once an operation transitions to completed or skipped,
+ *  it's not allowed to transition to pending or active.
+**/
 - (BOOL)_setStatus:(YDBCloudCoreOperationStatus)status forOperationUUID:(NSUUID *)uuid
 {
 	__block BOOL allowed = YES;
@@ -486,10 +546,10 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 			ephemeralInfo[uuid] = opInfo;
 		}
 		
-		NSNumber *existing = opInfo[YDBCloudCore_EphemeralKey_Status];
-		if (existing != nil)
+		NSNumber *existingStatusNum = opInfo[YDBCloudCore_EphemeralKey_Status];
+		if (existingStatusNum != nil)
 		{
-			YDBCloudCoreOperationStatus existingStatus = (YDBCloudCoreOperationStatus)[existing integerValue];
+			YDBCloudCoreOperationStatus existingStatus = (YDBCloudCoreOperationStatus)[existingStatusNum integerValue];
 			
 			if (existingStatus == YDBCloudOperationStatus_Completed ||
 			    existingStatus == YDBCloudOperationStatus_Skipped)
@@ -585,11 +645,11 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
  * You should allow the pipeline to mange the queue, and only start operations when told to.
  *
  * However, there is one particular edge case in which is is unavoidable: background network tasks.
- * If the app is relaunched, and you discover there are network task from a previously app session,
+ * If the app is relaunched, and you discover there are network tasks from a previously app session,
  * you'll obviously want to avoid starting the corresponding operation again.
  * In this case, you should use this method to inform the pipeline that the operation is already started.
 **/
-- (void)setStatusAsStartedForOperationWithUUID:(NSUUID *)opUUID
+- (void)setStatusAsActiveForOperationWithUUID:(NSUUID *)opUUID
 {
 	if (opUUID == nil) return;
 	
@@ -600,9 +660,12 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		__strong YapDatabaseCloudCorePipeline *strongSelf = weakSelf;
 		if (strongSelf == nil) return;
 		
-		if ([strongSelf _setStatus:YDBCloudOperationStatus_Started forOperationUUID:opUUID])
+		BOOL allowed = [strongSelf _setStatus:YDBCloudOperationStatus_Active forOperationUUID:opUUID];
+		if (allowed)
 		{
 			[strongSelf->startedOpUUIDs addObject:opUUID];
+			
+			[strongSelf _checkForActiveStatusChange]; // may have transitioned from inactive to active
 		}
 	}};
 	
@@ -628,10 +691,12 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		__strong YapDatabaseCloudCorePipeline *strongSelf = weakSelf;
 		if (strongSelf == nil) return;
 		
-		BOOL changed = [strongSelf _setStatus:YDBCloudOperationStatus_Pending forOperationUUID:opUUID];
-		if (changed)
+		BOOL allowed = [strongSelf _setStatus:YDBCloudOperationStatus_Pending forOperationUUID:opUUID];
+		if (allowed)
 		{
 			[strongSelf->startedOpUUIDs removeObject:opUUID];
+			
+			[strongSelf _checkForActiveStatusChange]; // may have transitioned from active to inactive
 			[strongSelf startNextOperationIfPossible];
 		}
 	}};
@@ -664,8 +729,8 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		__strong YapDatabaseCloudCorePipeline *strongSelf = weakSelf;
 		if (strongSelf == nil) return;
 		
-		BOOL changed = [strongSelf _setStatus:YDBCloudOperationStatus_Pending forOperationUUID:opUUID];
-		if (changed)
+		BOOL allowed = [strongSelf _setStatus:YDBCloudOperationStatus_Pending forOperationUUID:opUUID];
+		if (allowed)
 		{
 			[strongSelf _setEphemeralInfo:hold
 			                       forKey:YDBCloudCore_EphemeralKey_Hold
@@ -673,6 +738,8 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 			
 			[strongSelf->startedOpUUIDs removeObject:opUUID];
 			[strongSelf updateHoldTimer];
+			
+			[strongSelf _checkForActiveStatusChange]; // may have transitioned from active to inactive
 			[strongSelf startNextOperationIfPossible];
 		}
 	}};
@@ -892,10 +959,13 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 - (NSUInteger)suspendWithCount:(NSUInteger)suspendCountIncrement
 {
 	BOOL overflow = NO;
+	NSUInteger oldSuspendCount = 0;
 	NSUInteger newSuspendCount = 0;
 	
 	OSSpinLockLock(&suspendCountLock);
 	{
+		oldSuspendCount = suspendCount;
+		
 		if (suspendCount <= (NSUIntegerMax - suspendCountIncrement))
 			suspendCount += suspendCountIncrement;
 		else {
@@ -907,16 +977,18 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 	}
 	OSSpinLockUnlock(&suspendCountLock);
 	
-	if (overflow)
-	{
+	if (overflow) {
 		YDBLogWarn(@"%@ - The suspendCount has reached NSUIntegerMax!", THIS_METHOD);
 	}
-	else if (suspendCountIncrement > 0)
-	{
+	else if (suspendCountIncrement > 0) {
 		YDBLogInfo(@"=> SUSPENDED : incremented suspendCount == %lu", (unsigned long)newSuspendCount);
 	}
 	
 	[self postSuspendCountChangedNotification];
+	if ((oldSuspendCount == 0) && (newSuspendCount > 0))
+	{
+		[self checkForActiveStatusChange]; // may have transitioned from active to inactive
+	}
 	
 	return newSuspendCount;
 }
@@ -955,16 +1027,19 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 	}
 	else
 	{
-		if (newSuspendCount == 0)
-		{
+		if (newSuspendCount == 0) {
 			YDBLogInfo(@"=> RESUMED");
-			[self queueStartNextOperationIfPossible];
 		}
 		else {
 			YDBLogInfo(@"=> SUSPENDED : decremented suspendCount == %lu", (unsigned long)newSuspendCount);
 		}
 		
 		[self postSuspendCountChangedNotification];
+		if (newSuspendCount == 0)
+		{
+			[self checkForActiveStatusChange]; // may have transitioned from inactive to active
+			[self queueStartNextOperationIfPossible];
+		}
 	}
 	
 	return newSuspendCount;
@@ -1009,12 +1084,24 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 	return status;
 }
 
-- (void)checkActiveStatus
+- (void)checkForActiveStatusChange
+{
+	dispatch_block_t block = ^{ @autoreleasepool {
+		[self _checkForActiveStatusChange];
+	}};
+	
+	if (dispatch_get_specific(IsOnQueueKey))
+		block();
+	else
+		dispatch_sync(queue, block);
+}
+
+- (void)_checkForActiveStatusChange
 {
 	NSAssert(dispatch_get_specific(IsOnQueueKey), @"Must be executed within queue");
 	
 	__block BOOL hasOps = NO;
-	__block BOOL hasStartedOps = NO;
+	__block BOOL hasActiveOps = NO;
 	
 	[self _enumerateOperationsUsingBlock:
 		^(YapDatabaseCloudCoreOperation *operation, NSUInteger graphIdx, BOOL *stop)
@@ -1025,9 +1112,9 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		
 		if (graphIdx == 0)
 		{
-			if ([self statusForOperationWithUUID:operation.uuid] == YDBCloudOperationStatus_Started)
+			if ([self statusForOperationWithUUID:operation.uuid] == YDBCloudOperationStatus_Active)
 			{
-				hasStartedOps = YES;
+				hasActiveOps = YES;
 				*stop = YES;
 			}
 		}
@@ -1037,13 +1124,13 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		}
 	}];
 	
-	if (isActive)
+	if (isActive) // current reported state is active
 	{
 		// Transition to inactive when:
-		// - There are 0 operations in 'YDBCloudOperationStatus_Started' mode
+		// - There are 0 operations in 'YDBCloudOperationStatus_Active' mode
 		// - AND (the pipeline is suspended OR there are no more operations)
 		
-		if (!hasStartedOps)
+		if (!hasActiveOps)
 		{
 			if (!hasOps || self.isSuspended)
 			{
@@ -1052,12 +1139,12 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 			}
 		}
 	}
-	else
+	else // current reported state is inactive
 	{
 		// Transition to active when:
-		// - There are 1 or more operations in 'YDBCloudOperationStatus_Started' mode.
+		// - There are 1 or more operations in 'YDBCloudOperationStatus_Active' mode.
 		
-		if (hasStartedOps)
+		if (hasActiveOps)
 		{
 			isActive = YES;
 			[self postActiveStatusChanged:isActive];
@@ -1071,9 +1158,9 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		
 		NSDictionary *userInfo = @{ @"isActive" : @(_isActive) };
 		
-		[[NSNotificationCenter defaultCenter] postNotificationName:YDBCloudCorePipelineActiveStatusChangedNotification
-		                                                    object:self
-		                                                  userInfo:userInfo];
+		[[NSNotificationCenter defaultCenter] postNotificationName: YDBCloudCorePipelineActiveStatusChangedNotification
+		                                                    object: self
+		                                                  userInfo: userInfo];
 	};
 	
 	if ([NSThread isMainThread])
@@ -1278,12 +1365,12 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 	NSAssert(dispatch_get_specific(IsOnQueueKey), @"Must be executed within queue");
 	
 	if (algorithm == YDBCloudCorePipelineAlgorithm_CommitGraph)
-		[self startNextOperationIfPossible_CommitGraph];
+		[self _startNextOperationIfPossible_CommitGraph];
 	else
-		[self startNextOperationIfPossible_FlatGraph];
+		[self _startNextOperationIfPossible_FlatGraph];
 }
 
-- (void)startNextOperationIfPossible_CommitGraph
+- (void)_startNextOperationIfPossible_CommitGraph
 {
 	YDBLogAutoTrace();
 	
@@ -1325,7 +1412,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 	{
 		// Waiting for another graph to be added
 		
-		[self checkActiveStatus]; // may have transitioned from active to not-active
+		[self _checkForActiveStatusChange]; // may have transitioned from active to inactive
 		return;
 	}
 	
@@ -1359,7 +1446,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		
 		do {
 			
-			[self _setStatus:YDBCloudOperationStatus_Started forOperationUUID:nextOp.uuid];
+			[self _setStatus:YDBCloudOperationStatus_Active forOperationUUID:nextOp.uuid];
 			
 			YapDatabaseCloudCoreOperation *opToStart = nextOp;
 			dispatch_async(globalQueue, ^{ @autoreleasepool {
@@ -1379,11 +1466,11 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 			
 		} while (nextOp);
 		
-		[self checkActiveStatus];
+		[self _checkForActiveStatusChange]; // may have transitioned from inactive to active
 	}
 }
 
-- (void)startNextOperationIfPossible_FlatGraph
+- (void)_startNextOperationIfPossible_FlatGraph
 {
 	YDBLogAutoTrace();
 	
@@ -1408,12 +1495,23 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 			}
 		}
 		
-		// Careful: Graphs are setup in a linked-list,
-		// where each graph has a (weak) pointer to the previous graph.
-		// So we don't remove a graph from the list, unless it's at the front.
-		if (i == 0 && graph.operations.count == 0)
+		if (graph.operations.count == 0)
 		{
 			[graphs removeObjectAtIndex:i];
+			
+			// Careful: Graphs (in FlatCommit mode) are setup in a linked-list,
+			// where each graph has a (weak) pointer to the previous graph.
+			// So we need to fixup the link.
+			if (i < graphs.count)
+			{
+				YapDatabaseCloudCoreGraph *nextGraph = graphs[i];
+				if (i == 0) {
+					nextGraph.previousGraph = nil;
+				}
+				else {
+					nextGraph.previousGraph = graphs[i - 1];
+				}
+			}
 		}
 		else
 		{
@@ -1429,7 +1527,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 	{
 		// Waiting for another graph to be added
 		
-		[self checkActiveStatus]; // may have transitioned from active to not-active
+		[self _checkForActiveStatusChange]; // may have transitioned from active to inactive
 		return;
 	}
 	
@@ -1493,7 +1591,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		
 		do {
 			
-			[self _setStatus:YDBCloudOperationStatus_Started forOperationUUID:nextOp.uuid];
+			[self _setStatus:YDBCloudOperationStatus_Active forOperationUUID:nextOp.uuid];
 			
 			YapDatabaseCloudCoreOperation *opToStart = nextOp;
 			dispatch_async(globalQueue, ^{ @autoreleasepool {
@@ -1513,7 +1611,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 			
 		} while (nextOp);
 		
-		[self checkActiveStatus];
+		[self _checkForActiveStatusChange]; // may have transitioned from inactive to active
 	}
 }
 
