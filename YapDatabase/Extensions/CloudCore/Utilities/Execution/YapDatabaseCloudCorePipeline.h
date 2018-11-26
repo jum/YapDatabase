@@ -9,6 +9,8 @@
 #import "YapDatabaseCloudCoreOperation.h"
 #import "YapDatabaseCloudCore.h"
 
+NS_ASSUME_NONNULL_BEGIN
+
 typedef NS_ENUM(NSInteger, YDBCloudCorePipelineAlgorithm) {
 	
 	/**
@@ -147,7 +149,7 @@ extern NSString *const YDBCloudCorePipelineActiveStatusChangedNotification;
 @property (nonatomic, assign, readonly) YDBCloudCorePipelineAlgorithm algorithm;
 @property (nonatomic, weak, readonly) id <YapDatabaseCloudCorePipelineDelegate> delegate;
 
-@property (atomic, weak, readonly) YapDatabaseCloudCore *owner;
+@property (atomic, weak, readonly, nullable) YapDatabaseCloudCore *owner;
 
 #pragma mark Configuration
 
@@ -158,7 +160,7 @@ extern NSString *const YDBCloudCorePipelineActiveStatusChangedNotification;
  * 
  * This property must be set before the pipeline is registered.
 **/
-@property (nonatomic, copy, readwrite) NSSet *previousNames;
+@property (nonatomic, copy, readwrite, nullable) NSSet *previousNames;
 
 /**
  * This value is the maximum number of operations that will be assigned to the delegate at any one time.
@@ -187,7 +189,15 @@ extern NSString *const YDBCloudCorePipelineActiveStatusChangedNotification;
  *
  * @return The corresponding operation, if found. Otherwise nil.
 **/
-- (YapDatabaseCloudCoreOperation *)operationWithUUID:(NSUUID *)uuid;
+- (nullable YapDatabaseCloudCoreOperation *)operationWithUUID:(NSUUID *)uuid;
+
+/**
+ * Searches for a list of operations.
+ *
+ * @return A dictionary with all the found operations.
+ *         Operations which were not found won't be present in the returned dictionary.
+**/
+- (NSDictionary<NSUUID*, YapDatabaseCloudCoreOperation*> *)operationsWithUUIDs:(NSArray<NSUUID*> *)uuids;
 
 /**
  * Returns a list of operations in state 'YDBCloudOperationStatus_Active'.
@@ -234,34 +244,47 @@ extern NSString *const YDBCloudCorePipelineActiveStatusChangedNotification;
 **/
 - (void)setStatusAsPendingForOperationWithUUID:(NSUUID *)opUUID;
 
-/**
- * The PipelineDelegate may invoke this method to reset a failed operation,
- * and simultaneously tell the pipeline to delay retrying it again for a period of time.
- *
- * This is typically used when implementing retry logic such as exponential backoff.
- * It works by setting a hold on the operation to [now dateByAddingTimeInterval:delay].
-**/
-- (void)setStatusAsPendingForOperationWithUUID:(NSUUID *)opUUID
-                                    retryDelay:(NSTimeInterval)delay;
-
 #pragma mark Operation Hold
 
 /**
- * Returns the current hold for the operation, or nil if there is no hold.
+ * Returns the current hold for the operation (with the given context), or nil if there is no hold.
+ *
+ * Different context's allow different parts of the system to operate in parallel.
+ * For example, if an operation requires several different subsystems to each complete an action,
+ * then each susbsystem can independently place a hold on the operation.
+ * Once all holds are lifted, the pipeline can dispatch the operation again.
 **/
-- (NSDate *)holdDateForOperationWithUUID:(NSUUID *)opUUID;
+- (nullable NSDate *)holdDateForOperationWithUUID:(NSUUID *)opUUID context:(NSString *)context;
 
 /**
  * And operation can be put on "hold" until a specified date.
- * This is typically used in conjunction with retry logic such as exponential backoff.
+ *
+ * There are multiple uses for this. For example:
+ * - An operation may require various preparation tasks to complete before it can be started.
+ * - A failed operation may use a holdDate in conjunction with retry logic, such as exponential backoff.
  * 
- * The operation won't be delegated again until the given date.
- * You can pass a nil date to remove a hold on an operation.
- * 
- * @see setStatusAsPendingForOperation:withRetryDelay:
+ * The operation won't be started again until all associated holdDate's have expired.
+ * You can pass a nil date to remove a hold on an operation (for a given context).
 **/
-- (void)setHoldDate:(NSDate *)date forOperationWithUUID:(NSUUID *)opUUID;
+- (void)setHoldDate:(nullable NSDate *)date forOperationWithUUID:(NSUUID *)opUUID context:(NSString *)context;
 
+/**
+ * Returns the latest hold date for the given operation.
+ *
+ * If there are no holdDates for the operation, returns nil.
+ * If there are 1 or more holdDates, returns the latest date.
+**/
+- (nullable NSDate *)latestHoldDateForOperationWithUUID:(NSUUID *)opUUID;
+
+/**
+ * Returns a dictionary of all the hold dates associated with an operation.
+**/
+- (nullable NSDictionary<NSString*, NSDate*> *)holdDatesForOperationWithUUID:(NSUUID *)opUUID;
+
+/**
+ * Returns a dictionary of all the hold dates associated with a particular context.
+**/
+- (nullable NSDictionary<NSUUID*, NSDate*> *)holdDatesForContext:(NSString *)context;
 
 #pragma mark Suspend & Resume
 
@@ -342,3 +365,5 @@ extern NSString *const YDBCloudCorePipelineActiveStatusChangedNotification;
 @property (atomic, readonly) BOOL isActive;
 
 @end
+
+NS_ASSUME_NONNULL_END
