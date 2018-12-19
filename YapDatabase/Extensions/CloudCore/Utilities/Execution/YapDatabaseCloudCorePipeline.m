@@ -4,9 +4,11 @@
 
 #import "YapDatabaseCloudCorePipeline.h"
 #import "YapDatabaseCloudCorePrivate.h"
+
+#import "YapDatabaseAtomic.h"
 #import "YapDatabaseLogging.h"
 
-#import <libkern/OSAtomic.h>
+#import <stdatomic.h>
 
 /**
  * Define log level for this file: OFF, ERROR, WARN, INFO, VERBOSE
@@ -44,7 +46,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 	dispatch_queue_t queue;
 	void *IsOnQueueKey;
 	
-	OSSpinLock spinLock;
+	YAPUnfairLock spinLock;
 	
 	//
 	// These variables must only be accessed/modified within queue:
@@ -69,10 +71,10 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 	NSUInteger _atomic_maxConcurrentOperationCount;
 	
 	//
-	// These variable must only be accessed/modified via OSAtomic:
+	// These variable must only be accessed/modified via atomic_x():
 	//
 	
-	int needsStartNextOperationFlag;
+	atomic_flag needsStartNextOperationFlag;
 }
 
 @synthesize name = name;
@@ -132,7 +134,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		algorithm = inAlgorithm;
 		delegate = inDelegate;
 		
-		spinLock = OS_SPINLOCK_INIT;
+		spinLock = YAP_UNFAIR_LOCK_INIT;
 		
 		queue = dispatch_queue_create("YapDatabaseCloudCorePipeline", DISPATCH_QUEUE_SERIAL);
 		
@@ -223,11 +225,11 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 {
 	NSUInteger result = 0;
 	
-	OSSpinLockLock(&spinLock);
+	YAPUnfairLockLock(&spinLock);
 	{
 		result = _atomic_maxConcurrentOperationCount;
 	}
-	OSSpinLockUnlock(&spinLock);
+	YAPUnfairLockUnlock(&spinLock);
 	
 	return result;
 }
@@ -236,14 +238,14 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 {
 	BOOL changed = NO;
 	
-	OSSpinLockLock(&spinLock);
+	YAPUnfairLockLock(&spinLock);
 	{
 		if (_atomic_maxConcurrentOperationCount != value) {
 			_atomic_maxConcurrentOperationCount = value;
 			changed = YES;
 		}
 	}
-	OSSpinLockUnlock(&spinLock);
+	YAPUnfairLockUnlock(&spinLock);
 	
 	if (changed)
 	{
@@ -516,7 +518,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 - (BOOL)getGraphIndex:(NSUInteger *)graphIdxPtr forSnapshot:(uint64_t)snapshot
 {
 	__block BOOL found = NO;
-	__block uint64_t graphIdx = 0;
+	__block NSUInteger graphIdx = 0;
 	
 	dispatch_block_t block = ^{ @autoreleasepool {
 	#pragma clang diagnostic push
@@ -1113,11 +1115,11 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 {
 	NSUInteger currentSuspendCount = 0;
 	
-	OSSpinLockLock(&spinLock);
+	YAPUnfairLockLock(&spinLock);
 	{
 		currentSuspendCount = suspendCount;
 	}
-	OSSpinLockUnlock(&spinLock);
+	YAPUnfairLockUnlock(&spinLock);
 	
 	return currentSuspendCount;
 }
@@ -1156,7 +1158,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 	NSUInteger oldSuspendCount = 0;
 	NSUInteger newSuspendCount = 0;
 	
-	OSSpinLockLock(&spinLock);
+	YAPUnfairLockLock(&spinLock);
 	{
 		oldSuspendCount = suspendCount;
 		
@@ -1169,7 +1171,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		
 		newSuspendCount = suspendCount;
 	}
-	OSSpinLockUnlock(&spinLock);
+	YAPUnfairLockUnlock(&spinLock);
 	
 	if (overflow) {
 		YDBLogWarn(@"%@ - The suspendCount has reached NSUIntegerMax!", THIS_METHOD);
@@ -1205,7 +1207,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 	BOOL underflow = 0;
 	NSUInteger newSuspendCount = 0;
 	
-	OSSpinLockLock(&spinLock);
+	YAPUnfairLockLock(&spinLock);
 	{
 		if (suspendCount > 0)
 			suspendCount--;
@@ -1214,7 +1216,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 		
 		newSuspendCount = suspendCount;
 	}
-	OSSpinLockUnlock(&spinLock);
+	YAPUnfairLockUnlock(&spinLock);
 	
 	if (underflow) {
 		YDBLogWarn(@"%@ - Attempting to resume with suspendCount already at zero.", THIS_METHOD);
@@ -1632,11 +1634,8 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 **/
 - (void)queueStartNextOperationIfPossible
 {
-	int const flagOff = 0;
-	int const flagOn  = 1;
-	
-	BOOL didSetFlagOn = OSAtomicCompareAndSwapInt(flagOff, flagOn, &needsStartNextOperationFlag);
-	if (didSetFlagOn)
+	BOOL flagWasAlreadySet = atomic_flag_test_and_set(&needsStartNextOperationFlag);
+	if (!flagWasAlreadySet)
 	{
 		__weak YapDatabaseCloudCorePipeline *weakSelf = self;
 		
@@ -1645,7 +1644,7 @@ NSString *const YDBCloudCore_EphemeralKey_Hold     = @"hold";
 			__strong YapDatabaseCloudCorePipeline *strongSelf = weakSelf;
 			if (strongSelf)
 			{
-				OSAtomicCompareAndSwapInt(flagOn, flagOff, &strongSelf->needsStartNextOperationFlag);
+				atomic_flag_clear(&strongSelf->needsStartNextOperationFlag);
 				
 				[strongSelf startNextOperationIfPossible];
 			}
