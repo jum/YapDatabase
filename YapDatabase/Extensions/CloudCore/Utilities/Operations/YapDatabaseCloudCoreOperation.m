@@ -43,6 +43,10 @@ NSString *const YDBCloudCoreOperationIsReadyToStartNotification = @"YDBCloudCore
 
 @synthesize pendingStatus = pendingStatus;
 
+@dynamic pendingStatusIsCompletedOrSkipped;
+@dynamic pendingStatusIsCompleted;
+@dynamic pendingStatusIsSkipped;
+
 // Public properties
 
 @synthesize uuid = uuid;
@@ -153,11 +157,27 @@ NSString *const YDBCloudCoreOperationIsReadyToStartNotification = @"YDBCloudCore
 - (void)setDependencies:(NSSet<NSUUID *> *)inDependencies
 {
 	NSMutableSet<NSUUID *> *newDependencies = [NSMutableSet setWithCapacity:inDependencies.count];
-	for (id obj in inDependencies)
+	for (id dependency in inDependencies)
 	{
-		if ([obj isKindOfClass:[NSUUID class]])
+		NSUUID *dependencyUUID = nil;
+		
+		if ([dependency isKindOfClass:[NSUUID class]])
 		{
-			[newDependencies addObject:(NSUUID *)obj];
+			dependencyUUID = (NSUUID *)dependency;
+		}
+		else if ([dependency isKindOfClass:[YapDatabaseCloudCoreOperation class]])
+		{
+			dependencyUUID = [(YapDatabaseCloudCoreOperation *)dependency uuid];
+		}
+		
+		if ([dependencyUUID isEqual:uuid]) {
+			// Ignore - op cannot depend on itself
+			continue;
+		}
+		
+		if (dependencyUUID)
+		{
+			[newDependencies addObject:dependencyUUID];
 		}
 		else
 		{
@@ -191,6 +211,11 @@ NSString *const YDBCloudCoreOperationIsReadyToStartNotification = @"YDBCloudCore
 		dependencyUUID = [(YapDatabaseCloudCoreOperation *)dependency uuid];
 	}
 	
+	if ([dependencyUUID isEqual:uuid]) {
+		// Ignore - op cannot depend on itself
+		return;
+	}
+	
 #ifndef NS_BLOCK_ASSERTIONS
 	NSAssert(dependencyUUID != nil, @"Bad dependecy object !");
 #else
@@ -199,11 +224,6 @@ NSString *const YDBCloudCoreOperationIsReadyToStartNotification = @"YDBCloudCore
 		return;
 	}
 #endif
-	
-	if ([dependencyUUID isEqual:uuid]) {
-		// Ignore - op cannot depend on itself
-		return;
-	}
 	
 	NSString *const propKey = NSStringFromSelector(@selector(dependencies));
 	
@@ -252,13 +272,13 @@ NSString *const YDBCloudCoreOperationIsReadyToStartNotification = @"YDBCloudCore
 #pragma mark Protected API
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-- (BOOL)pendingStatusIsSkippedOrCompleted
+- (BOOL)pendingStatusIsCompletedOrSkipped
 {
 	if (pendingStatus != nil)
 	{
 		YDBCloudCoreOperationStatus status = (YDBCloudCoreOperationStatus)[pendingStatus integerValue];
 		
-		return (status == YDBCloudOperationStatus_Skipped || status == YDBCloudOperationStatus_Completed);
+		return (status == YDBCloudOperationStatus_Completed || status == YDBCloudOperationStatus_Skipped);
 	}
 	else
 	{
